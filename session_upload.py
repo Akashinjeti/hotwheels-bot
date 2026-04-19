@@ -1,11 +1,8 @@
 """
-session_upload.py
-─────────────────
-A tiny web server that lets you paste Blinkit cookies from your browser
-DevTools into a form. It saves them as a valid Playwright session file
-so the bot can use them immediately.
-
-Run alongside the bot or separately on Railway.
+session_upload.py  (v2)
+────────────────────────
+Saves Blinkit session both to file AND to a Railway environment variable
+so it survives container restarts without needing a Volume.
 """
 
 from __future__ import annotations
@@ -16,10 +13,26 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import base64
 
-SESSION_FILE = Path(os.getenv("SESSION_FILE", "session/blinkit_session.json"))
-UPLOAD_PORT  = int(os.getenv("UPLOAD_PORT", "8080"))
-SECRET_KEY   = os.getenv("UPLOAD_SECRET", "hotwheels2024")   # change this!
+SESSION_FILE  = Path(os.getenv("SESSION_FILE", "session/blinkit_session.json"))
+UPLOAD_PORT   = int(os.getenv("UPLOAD_PORT", "8080"))
+SECRET_KEY    = os.getenv("UPLOAD_SECRET", "hotwheels2024")
+
+# On startup, restore session from env var if file doesn't exist
+def restore_session_from_env() -> bool:
+    encoded = os.environ.get("BLINKIT_SESSION_B64", "")
+    if encoded and not SESSION_FILE.exists():
+        try:
+            SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            decoded = base64.b64decode(encoded).decode()
+            SESSION_FILE.write_text(decoded)
+            print(f"✅  Session restored from environment variable ({len(decoded)} bytes)")
+            return True
+        except Exception as e:
+            print(f"⚠️  Could not restore session from env: {e}")
+    return False
+
 
 HTML_FORM = """<!DOCTYPE html>
 <html>
@@ -29,13 +42,14 @@ HTML_FORM = """<!DOCTYPE html>
 <style>
   body {{ font-family: monospace; background: #111; color: #eee; padding: 20px; max-width: 800px; margin: 0 auto; }}
   h1 {{ color: #f90; }}
-  textarea {{ width: 100%; height: 200px; background: #222; color: #0f0; border: 1px solid #444; padding: 10px; font-size: 12px; }}
-  input[type=text] {{ width: 100%; padding: 8px; background: #222; color: #eee; border: 1px solid #444; margin: 5px 0; }}
-  button {{ background: #f90; color: #000; border: none; padding: 12px 24px; font-size: 16px; cursor: pointer; margin-top: 10px; }}
+  textarea {{ width: 100%; height: 180px; background: #222; color: #0f0; border: 1px solid #444; padding: 10px; font-size: 12px; box-sizing: border-box; }}
+  input[type=text], input[type=password] {{ width: 100%; padding: 8px; background: #222; color: #eee; border: 1px solid #444; margin: 5px 0; box-sizing: border-box; }}
+  button {{ background: #f90; color: #000; border: none; padding: 12px 24px; font-size: 16px; cursor: pointer; margin-top: 10px; width: 100%; }}
   .step {{ background: #1a1a1a; border-left: 3px solid #f90; padding: 10px 15px; margin: 10px 0; }}
-  .ok {{ color: #0f0; }}
-  .err {{ color: #f00; }}
-  code {{ background: #222; padding: 2px 6px; }}
+  .ok {{ color: #0f0; font-weight: bold; font-size: 18px; }}
+  .err {{ color: #f00; font-weight: bold; }}
+  code {{ background: #222; padding: 2px 6px; border-radius: 3px; }}
+  label {{ display: block; margin-top: 12px; color: #f90; }}
 </style>
 </head>
 <body>
@@ -43,55 +57,34 @@ HTML_FORM = """<!DOCTYPE html>
 
 {status}
 
-<h2>Instructions</h2>
-
-<div class="step">
-<b>Step 1</b> — Open <a href="https://blinkit.com" target="_blank" style="color:#f90">blinkit.com</a> in your browser and log in with your phone number + OTP.
-Set your delivery location to <b>Madhapur, 500081</b>.
-</div>
-
-<div class="step">
-<b>Step 2</b> — Open DevTools:<br>
-• Chrome/Edge: Press <code>F12</code> → Application tab → Cookies → blinkit.com<br>
-• OR press <code>F12</code> → Console tab → paste this and press Enter:<br>
-<code>copy(document.cookie)</code><br>
-This copies all cookies to your clipboard.
-</div>
-
-<div class="step">
-<b>Step 3</b> — Also get localStorage. In Console paste:<br>
-<code>copy(JSON.stringify(Object.fromEntries(Object.entries(localStorage))))</code>
-</div>
-
-<div class="step">
-<b>Step 4</b> — Fill the form below and submit.
-</div>
+<div class="step"><b>Step 1</b> — Open <a href="https://blinkit.com" target="_blank" style="color:#f90">blinkit.com</a>, log in, set location to <b>Madhapur 500081</b></div>
+<div class="step"><b>Step 2</b> — Press <b>F12</b> → Console → type <code>allow pasting</code> → Enter</div>
+<div class="step"><b>Step 3</b> — Paste this → Enter → Ctrl+C won't work, it auto-copies:<br><code>copy(document.cookie)</code></div>
+<div class="step"><b>Step 4</b> — Paste cookies below, then repeat with:<br><code>copy(JSON.stringify(Object.fromEntries(Object.entries(localStorage))))</code></div>
 
 <form method="POST" action="/upload">
   <label>Secret Key:</label>
-  <input type="text" name="secret" placeholder="hotwheels2024" required>
+  <input type="password" name="secret" placeholder="hotwheels2024" required>
 
-  <label>Cookies (paste from DevTools → Application → Cookies, or use the copy() command above):</label>
-  <textarea name="cookies" placeholder='Paste cookie string here e.g.: _device_id=abc123; gr_token=xyz...' required></textarea>
+  <label>Cookies (from copy(document.cookie)):</label>
+  <textarea name="cookies" placeholder="Paste cookie string here..." required></textarea>
 
-  <label>LocalStorage JSON (paste the JSON from the copy() command, or leave as {{}}):</label>
-  <textarea name="localstorage" placeholder='{{"key": "value", ...}}'>{{}}</textarea>
-
-  <label>Origin URL (leave as default):</label>
-  <input type="text" name="origin" value="https://blinkit.com">
+  <label>LocalStorage JSON (from copy(JSON.stringify(...)) or leave as {{}}):</label>
+  <textarea name="localstorage">{{}}</textarea>
 
   <button type="submit">💾 Save Session & Activate Bot</button>
 </form>
 
 <hr>
-<p style="color:#666">Session status: {session_status}</p>
+<p style="color:#888">Session status: {session_status}</p>
+<p style="color:#888">After saving, copy the BLINKIT_SESSION_B64 value shown and add it as a Railway variable to make the session permanent.</p>
+{b64_section}
 </body>
 </html>
 """
 
 
 def parse_cookie_string(cookie_str: str) -> list[dict]:
-    """Convert a raw cookie string into Playwright storage_state cookie format."""
     cookies = []
     for part in cookie_str.split(";"):
         part = part.strip()
@@ -99,94 +92,87 @@ def parse_cookie_string(cookie_str: str) -> list[dict]:
             continue
         name, _, value = part.partition("=")
         cookies.append({
-            "name":     name.strip(),
-            "value":    value.strip(),
-            "domain":   ".blinkit.com",
-            "path":     "/",
-            "expires":  -1,
-            "httpOnly": False,
-            "secure":   True,
-            "sameSite": "None",
+            "name": name.strip(), "value": value.strip(),
+            "domain": ".blinkit.com", "path": "/",
+            "expires": -1, "httpOnly": False,
+            "secure": True, "sameSite": "None",
         })
     return cookies
 
 
 def build_storage_state(cookies: list[dict], local_storage: dict) -> dict:
-    """Build a Playwright-compatible storage_state dict."""
     origins = []
     if local_storage:
         origins.append({
             "origin": "https://blinkit.com",
-            "localStorage": [
-                {"name": k, "value": str(v)}
-                for k, v in local_storage.items()
-            ],
+            "localStorage": [{"name": k, "value": str(v)} for k, v in local_storage.items()],
         })
     return {"cookies": cookies, "origins": origins}
 
 
 class Handler(BaseHTTPRequestHandler):
-
-    def log_message(self, format, *args):
-        pass  # suppress default access logs
+    def log_message(self, format, *args): pass
 
     def do_GET(self):
         if urlparse(self.path).path not in ("/", "/upload"):
-            self._send(404, "Not found")
-            return
+            self._send(404, "Not found"); return
         self._send(200, self._render_form(""))
 
     def do_POST(self):
         if urlparse(self.path).path != "/upload":
-            self._send(404, "Not found")
-            return
+            self._send(404, "Not found"); return
 
         length  = int(self.headers.get("Content-Length", 0))
         body    = self.rfile.read(length).decode()
         params  = parse_qs(body)
 
-        secret      = params.get("secret",       [""])[0]
-        cookie_str  = params.get("cookies",      [""])[0].strip()
-        ls_str      = params.get("localstorage", ["{}"])[0].strip()
-        origin      = params.get("origin",       ["https://blinkit.com"])[0]
+        secret     = params.get("secret",       [""])[0]
+        cookie_str = params.get("cookies",      [""])[0].strip()
+        ls_str     = params.get("localstorage", ["{}"])[0].strip()
 
         if secret != SECRET_KEY:
-            self._send(200, self._render_form(
-                '<p class="err">❌ Wrong secret key.</p>'
-            ))
-            return
-
+            self._send(200, self._render_form('<p class="err">❌ Wrong secret key.</p>')); return
         if not cookie_str:
-            self._send(200, self._render_form(
-                '<p class="err">❌ Cookie string is empty.</p>'
-            ))
-            return
+            self._send(200, self._render_form('<p class="err">❌ Cookies are empty.</p>')); return
 
         try:
-            local_storage = json.loads(ls_str) if ls_str and ls_str != "{}" else {}
-        except json.JSONDecodeError:
+            local_storage = json.loads(ls_str) if ls_str and ls_str not in ("{}", "") else {}
+        except Exception:
             local_storage = {}
 
         cookies       = parse_cookie_string(cookie_str)
         storage_state = build_storage_state(cookies, local_storage)
+        state_json    = json.dumps(storage_state, indent=2)
 
         SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SESSION_FILE.write_text(json.dumps(storage_state, indent=2))
+        SESSION_FILE.write_text(state_json)
 
-        status = (
-            f'<p class="ok">✅ Session saved! {len(cookies)} cookies stored.<br>'
-            f"The bot will use this session on the next cycle.<br>"
-            f"<b>You can close this page now.</b></p>"
-        )
-        self._send(200, self._render_form(status))
+        # Encode as base64 for Railway variable
+        b64 = base64.b64encode(state_json.encode()).decode()
 
-    def _render_form(self, status: str) -> str:
+        status = f'<p class="ok">✅ Session saved! {len(cookies)} cookies stored.</p>'
+        b64_section = f"""
+<div style="background:#1a1a1a; border:1px solid #f90; padding:15px; margin-top:20px;">
+<p style="color:#f90; font-weight:bold">⚠️ IMPORTANT — Make session permanent:</p>
+<p>Go to Railway → Variables → Add new variable:</p>
+<p><b>Name:</b> <code>BLINKIT_SESSION_B64</code></p>
+<p><b>Value:</b> (copy everything in the box below)</p>
+<textarea readonly onclick="this.select()" style="height:80px; color:#0ff;">{b64}</textarea>
+<p>After adding this variable, Railway will automatically restore your session after every restart.</p>
+</div>"""
+
+        self._send(200, self._render_form(status, b64_section))
+
+    def _render_form(self, status: str, b64_section: str = "") -> str:
         session_status = (
             f"✅ Session file exists ({SESSION_FILE.stat().st_size} bytes)"
-            if SESSION_FILE.exists()
-            else "⚠️ No session file yet"
+            if SESSION_FILE.exists() else "⚠️ No session file yet"
         )
-        return HTML_FORM.format(status=status, session_status=session_status)
+        return HTML_FORM.format(
+            status=status,
+            session_status=session_status,
+            b64_section=b64_section,
+        )
 
     def _send(self, code: int, body: str) -> None:
         encoded = body.encode()
@@ -198,7 +184,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start_upload_server() -> None:
-    """Start the upload server in a background thread."""
+    restore_session_from_env()
     server = HTTPServer(("0.0.0.0", UPLOAD_PORT), Handler)
     print(f"🌐  Session upload server running on port {UPLOAD_PORT}")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -206,7 +192,7 @@ def start_upload_server() -> None:
 
 
 if __name__ == "__main__":
-    # Run standalone for testing
+    restore_session_from_env()
     server = HTTPServer(("0.0.0.0", UPLOAD_PORT), Handler)
     print(f"🌐  Upload server on http://localhost:{UPLOAD_PORT}")
     server.serve_forever()
