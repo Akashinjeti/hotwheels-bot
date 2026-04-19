@@ -20,8 +20,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-TOKEN   = os.getenv("8650954020:AAFODan9F2pHODahB51lsnN0-G2H6riXmjo", "")
-CHAT_ID = os.getenv("1695508762", "")
+TOKEN   = os.environ.get("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 
 TG_API  = f"https://api.telegram.org/bot{TOKEN}"
 
